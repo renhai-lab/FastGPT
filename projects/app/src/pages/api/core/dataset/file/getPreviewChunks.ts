@@ -1,80 +1,101 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
-import { BucketNameEnum } from '@fastgpt/global/common/file/constants';
-import { authFile } from '@fastgpt/service/support/permission/auth/file';
-import { PostPreviewFilesChunksProps } from '@/global/core/dataset/api';
-import { readFileContentFromMongo } from '@fastgpt/service/common/file/gridfs/controller';
-import { splitText2Chunks } from '@fastgpt/global/common/string/textSplitter';
-import { ImportDataSourceEnum } from '@fastgpt/global/core/dataset/constants';
-import { parseCsvTable2Chunks } from '@fastgpt/service/core/dataset/training/utils';
+import { DatasetSourceReadTypeEnum } from '@fastgpt/global/core/dataset/constants';
+import { rawText2Chunks, readDatasetSourceRawText } from '@fastgpt/service/core/dataset/read';
+import { NextAPI } from '@/service/middleware/entry';
+import { ApiRequestProps } from '@fastgpt/service/type/next';
+import {
+  OwnerPermissionVal,
+  WritePermissionVal
+} from '@fastgpt/global/support/permission/constant';
+import { authCollectionFile } from '@fastgpt/service/support/permission/auth/file';
+import { authDataset } from '@fastgpt/service/support/permission/dataset/auth';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
+export type PostPreviewFilesChunksProps = {
+  datasetId: string;
+  type: DatasetSourceReadTypeEnum;
+  sourceId: string;
 
-    const { type, sourceId, chunkSize, customSplitChar, overlapRatio } =
-      req.body as PostPreviewFilesChunksProps;
+  chunkSize: number;
+  overlapRatio: number;
+  customSplitChar?: string;
 
-    if (!sourceId) {
-      throw new Error('fileIdList is empty');
-    }
-    if (chunkSize > 30000) {
-      throw new Error('chunkSize is too large, should be less than 30000');
-    }
+  // Read params
+  selector?: string;
+  isQAImport?: boolean;
+  externalFileId?: string;
+};
+export type PreviewChunksResponse = {
+  q: string;
+  a: string;
+}[];
 
-    const { chunks } = await (async () => {
-      if (type === ImportDataSourceEnum.fileLocal) {
-        const { file, teamId } = await authFile({ req, authToken: true, fileId: sourceId });
-        const fileId = String(file._id);
+async function handler(
+  req: ApiRequestProps<PostPreviewFilesChunksProps>
+): Promise<PreviewChunksResponse> {
+  const {
+    type,
+    sourceId,
+    chunkSize,
+    customSplitChar,
+    overlapRatio,
+    selector,
+    isQAImport,
+    datasetId,
+    externalFileId
+  } = req.body;
 
-        const { rawText } = await readFileContentFromMongo({
-          teamId,
-          bucketName: BucketNameEnum.dataset,
-          fileId,
-          csvFormat: true
-        });
-        // split chunks (5 chunk)
-        const sliceRawText = 10 * chunkSize;
-        const { chunks } = splitText2Chunks({
-          text: rawText.slice(0, sliceRawText),
-          chunkLen: chunkSize,
-          overlapRatio,
-          customReg: customSplitChar ? [customSplitChar] : []
-        });
-
-        return {
-          chunks: chunks.map((item) => ({
-            q: item,
-            a: ''
-          }))
-        };
-      }
-      if (type === ImportDataSourceEnum.csvTable) {
-        const { file, teamId } = await authFile({ req, authToken: true, fileId: sourceId });
-        const fileId = String(file._id);
-        const { rawText } = await readFileContentFromMongo({
-          teamId,
-          bucketName: BucketNameEnum.dataset,
-          fileId,
-          csvFormat: false
-        });
-        const { chunks } = parseCsvTable2Chunks(rawText);
-
-        return {
-          chunks: chunks || []
-        };
-      }
-      return { chunks: [] };
-    })();
-
-    jsonRes<{ q: string; a: string }[]>(res, {
-      data: chunks.slice(0, 5)
-    });
-  } catch (error) {
-    jsonRes(res, {
-      code: 500,
-      error
-    });
+  if (!sourceId) {
+    throw new Error('sourceId is empty');
   }
+  if (chunkSize > 30000) {
+    throw new Error('chunkSize is too large, should be less than 30000');
+  }
+
+  const { teamId, apiServer, feishuServer, yuqueServer } = await (async () => {
+    if (type === DatasetSourceReadTypeEnum.fileLocal) {
+      const res = await authCollectionFile({
+        req,
+        authToken: true,
+        authApiKey: true,
+        fileId: sourceId,
+        per: OwnerPermissionVal
+      });
+      return {
+        teamId: res.teamId
+      };
+    }
+    const { dataset } = await authDataset({
+      req,
+      authApiKey: true,
+      authToken: true,
+      datasetId,
+      per: WritePermissionVal
+    });
+    return {
+      teamId: dataset.teamId,
+      apiServer: dataset.apiServer,
+      feishuServer: dataset.feishuServer,
+      yuqueServer: dataset.yuqueServer
+    };
+  })();
+
+  const rawText = await readDatasetSourceRawText({
+    teamId,
+    type,
+    sourceId,
+    selector,
+    isQAImport,
+    apiServer,
+    feishuServer,
+    yuqueServer,
+    externalFileId
+  });
+
+  return rawText2Chunks({
+    rawText,
+    chunkLen: chunkSize,
+    overlapRatio,
+    customReg: customSplitChar ? [customSplitChar] : [],
+    isQAImport: isQAImport
+  }).slice(0, 15);
 }
+export default NextAPI(handler);

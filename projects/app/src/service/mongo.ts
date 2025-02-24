@@ -4,39 +4,17 @@ import { connectMongo } from '@fastgpt/service/common/mongo/init';
 import { hashStr } from '@fastgpt/global/common/string/tools';
 import { createDefaultTeam } from '@fastgpt/service/support/user/team/controller';
 import { exit } from 'process';
-import { initVectorStore } from '@fastgpt/service/common/vectorStore/controller';
-import { getInitConfig } from '@/pages/api/common/system/getInitData';
-import { startCron } from './common/system/cron';
 import { mongoSessionRun } from '@fastgpt/service/common/mongo/sessionRun';
-import { initGlobal } from './common/system';
-import { startMongoWatch } from './common/system/volumnMongoWatch';
-import { startTrainingQueue } from './core/dataset/training/utils';
 
 /**
+ * This function is equivalent to the entry to the service
  * connect MongoDB and init data
  */
-export function connectToDatabase(): Promise<void> {
-  return connectMongo({
-    beforeHook: () => {
-      initGlobal();
-    },
-    afterHook: async () => {
-      // init system config
-      getInitConfig();
-      //init vector database, init root user
-      await Promise.all([initVectorStore(), initRootUser()]);
-
-      startMongoWatch();
-      // cron
-      startCron();
-
-      // start queue
-      startTrainingQueue(true);
-    }
-  });
+export function connectToDatabase() {
+  return connectMongo();
 }
 
-async function initRootUser(retry = 3): Promise<any> {
+export async function initRootUser(retry = 3): Promise<any> {
   try {
     const rootUser = await MongoUser.findOne({
       username: 'root'
@@ -64,7 +42,7 @@ async function initRootUser(retry = 3): Promise<any> {
         rootId = _id;
       }
       // init root team
-      await createDefaultTeam({ userId: rootId, balance: 9999 * PRICE_SCALE, session });
+      await createDefaultTeam({ userId: rootId, session });
     });
 
     console.log(`root user init:`, {

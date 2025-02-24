@@ -1,5 +1,5 @@
-import { connectionMongo, type Model } from '../../../common/mongo';
-const { Schema, model, models } = connectionMongo;
+import { connectionMongo, getMongoModel } from '../../../common/mongo';
+const { Schema } = connectionMongo;
 import { TeamSchema as TeamType } from '@fastgpt/global/support/user/team/type.d';
 import { userCollectionName } from '../../user/schema';
 import { TeamCollectionName } from '@fastgpt/global/support/user/team/constant';
@@ -21,10 +21,7 @@ const TeamSchema = new Schema({
     type: Date,
     default: () => Date.now()
   },
-  balance: {
-    type: Number,
-    default: 0
-  },
+  balance: Number,
   teamDomain: {
     type: String
   },
@@ -42,7 +39,24 @@ const TeamSchema = new Schema({
     },
     appid: {
       type: String
+    },
+    pat: {
+      type: String
     }
+  },
+  openaiAccount: {
+    type: {
+      key: String,
+      baseUrl: String
+    }
+  },
+  externalWorkflowVariables: {
+    type: Object,
+    default: {}
+  },
+  notificationAccount: {
+    type: String,
+    required: false
   }
 });
 
@@ -53,5 +67,4 @@ try {
   console.log(error);
 }
 
-export const MongoTeam: Model<TeamType> =
-  models[TeamCollectionName] || model(TeamCollectionName, TeamSchema);
+export const MongoTeam = getMongoModel<TeamType>(TeamCollectionName, TeamSchema);

@@ -9,8 +9,10 @@ import { getDefaultIndex } from '@fastgpt/global/core/dataset/utils';
 import { jiebaSplit } from '@fastgpt/service/common/string/jieba';
 import { deleteDatasetDataVector } from '@fastgpt/service/common/vectorStore/controller';
 import { DatasetDataItemType } from '@fastgpt/global/core/dataset/type';
-import { getVectorModel } from '@fastgpt/service/core/ai/model';
+import { getEmbeddingModel } from '@fastgpt/service/core/ai/model';
 import { mongoSessionRun } from '@fastgpt/service/common/mongo/sessionRun';
+import { ClientSession } from '@fastgpt/service/common/mongo';
+import { MongoDatasetDataText } from '@fastgpt/service/core/dataset/data/dataTextSchema';
 
 /* insert data.
  * 1. create data id
@@ -26,12 +28,13 @@ export async function insertData2Dataset({
   a = '',
   chunkIndex = 0,
   indexes,
-  model
+  model,
+  session
 }: CreateDatasetDataProps & {
   model: string;
+  session?: ClientSession;
 }) {
   if (!q || !datasetId || !collectionId || !model) {
-    console.log(q, a, datasetId, collectionId, model);
     return Promise.reject('q, datasetId, collectionId, model is required');
   }
   if (String(teamId) === String(tmbId)) {
@@ -40,7 +43,8 @@ export async function insertData2Dataset({
 
   const qaStr = getDefaultIndex({ q, a }).text;
 
-  // empty indexes check, if empty, create default index
+  // 1. Get vector indexes and insert
+  // Empty indexes check, if empty, create default index
   indexes =
     Array.isArray(indexes) && indexes.length > 0
       ? indexes.map((index) => ({
@@ -52,6 +56,12 @@ export async function insertData2Dataset({
 
   if (!indexes.find((index) => index.defaultIndex)) {
     indexes.unshift(getDefaultIndex({ q, a }));
+  } else if (q && a && !indexes.find((index) => index.text === q)) {
+    // push a q index
+    indexes.push({
+      defaultIndex: false,
+      text: q
+    });
   }
 
   indexes = indexes.slice(0, 6);
@@ -61,7 +71,7 @@ export async function insertData2Dataset({
     indexes.map((item) =>
       insertDatasetDataVector({
         query: item.text,
-        model: getVectorModel(model),
+        model: getEmbeddingModel(model),
         teamId,
         datasetId,
         collectionId
@@ -69,21 +79,41 @@ export async function insertData2Dataset({
     )
   );
 
-  // create mongo data
-  const { _id } = await MongoDatasetData.create({
-    teamId,
-    tmbId,
-    datasetId,
-    collectionId,
-    q,
-    a,
-    fullTextToken: jiebaSplit({ text: qaStr }),
-    chunkIndex,
-    indexes: indexes?.map((item, i) => ({
-      ...item,
-      dataId: result[i].insertId
-    }))
-  });
+  // 2. Create mongo data
+  const [{ _id }] = await MongoDatasetData.create(
+    [
+      {
+        teamId,
+        tmbId,
+        datasetId,
+        collectionId,
+        q,
+        a,
+        // FullText tmp
+        // fullTextToken: jiebaSplit({ text: qaStr }),
+        chunkIndex,
+        indexes: indexes?.map((item, i) => ({
+          ...item,
+          dataId: result[i].insertId
+        }))
+      }
+    ],
+    { session }
+  );
+
+  // 3. Create mongo data text
+  await MongoDatasetDataText.create(
+    [
+      {
+        teamId,
+        datasetId,
+        collectionId,
+        dataId: _id,
+        fullTextToken: jiebaSplit({ text: qaStr })
+      }
+    ],
+    { session }
+  );
 
   return {
     insertId: _id,
@@ -101,7 +131,7 @@ export async function insertData2Dataset({
  */
 export async function updateData2Dataset({
   dataId,
-  q,
+  q = '',
   a,
   indexes,
   model
@@ -189,7 +219,7 @@ export async function updateData2Dataset({
       if (item.type === 'create' || item.type === 'update') {
         const result = await insertDatasetDataVector({
           query: item.index.text,
-          model: getVectorModel(model),
+          model: getEmbeddingModel(model),
           teamId: mongoData.teamId,
           datasetId: mongoData.datasetId,
           collectionId: mongoData.collectionId
@@ -212,10 +242,18 @@ export async function updateData2Dataset({
     // update mongo other data
     mongoData.q = q || mongoData.q;
     mongoData.a = a ?? mongoData.a;
-    mongoData.fullTextToken = jiebaSplit({ text: mongoData.q + mongoData.a });
+    // FullText tmp
+    // mongoData.fullTextToken = jiebaSplit({ text: `${mongoData.q}\n${mongoData.a}`.trim() });
     // @ts-ignore
     mongoData.indexes = newIndexes;
     await mongoData.save({ session });
+
+    // update mongo data text
+    await MongoDatasetDataText.updateOne(
+      { dataId: mongoData._id },
+      { fullTextToken: jiebaSplit({ text: `${mongoData.q}\n${mongoData.a}`.trim() }) },
+      { session }
+    );
 
     // delete vector
     const deleteIdList = patchResult

@@ -1,5 +1,5 @@
-import { connectionMongo, type Model } from '../../common/mongo';
-const { Schema, model, models } = connectionMongo;
+import { connectionMongo, getMongoModel } from '../../common/mongo';
+const { Schema } = connectionMongo;
 import { hashStr } from '@fastgpt/global/common/string/tools';
 import type { UserModelSchema } from '@fastgpt/global/support/user/type';
 import { UserStatusEnum, userStatusMap } from '@fastgpt/global/support/user/constant';
@@ -18,14 +18,8 @@ const UserSchema = new Schema({
     required: true,
     unique: true // 唯一
   },
-  email: {
-    type: String
-  },
   phonePrefix: {
     type: Number
-  },
-  phone: {
-    type: String
   },
   password: {
     type: String,
@@ -37,15 +31,6 @@ const UserSchema = new Schema({
   createTime: {
     type: Date,
     default: () => new Date()
-  },
-  avatar: {
-    type: String,
-    default: '/icon/human.svg'
-  },
-  inviterId: {
-    // 谁邀请注册的
-    type: Schema.Types.ObjectId,
-    ref: 'user'
   },
   promotionRate: {
     type: Number,
@@ -63,17 +48,26 @@ const UserSchema = new Schema({
   },
   lastLoginTmbId: {
     type: Schema.Types.ObjectId
-  }
+  },
+
+  inviterId: {
+    // 谁邀请注册的
+    type: Schema.Types.ObjectId,
+    ref: userCollectionName
+  },
+  fastgpt_sem: Object,
+  sourceDomain: String,
+  contact: String,
+
+  /** @deprecated */
+  avatar: String
 });
 
 try {
-  // login
-  UserSchema.index({ username: 1, password: 1 });
+  // Admin charts
   UserSchema.index({ createTime: -1 });
 } catch (error) {
   console.log(error);
 }
 
-export const MongoUser: Model<UserModelSchema> =
-  models[userCollectionName] || model(userCollectionName, UserSchema);
-MongoUser.syncIndexes();
+export const MongoUser = getMongoModel<UserModelSchema>(userCollectionName, UserSchema);

@@ -1,13 +1,13 @@
-### FastGPT V4.7
+### FastGPT V4.8.20 更新说明
 
-1. 新增 - 工具调用模块，可以让LLM模型根据用户意图，动态的选择其他模型或插件执行。
-2. 新增 - 分类和内容提取支持 functionCall 模式。部分模型支持 functionCall 不支持 ToolCall，也可以使用了。需要把 LLM 模型配置文件里的 `functionCall` 设置为 `true`， `toolChoice`设置为 `false`。如果 `toolChoice` 为 true，会走 tool 模式。
-3. 新增 - HTTP插件，可实现OpenAPI快速生成插件。
-4. 优化 - 高级编排性能。
-5. 优化 - AI模型选择。
-6. 优化 - 手动输入知识库弹窗。
-7. 优化 - 变量输入弹窗。
-8. 优化 - 浏览器读取文件自动推断编码，减少乱码情况。
-9. [点击查看高级编排介绍文档](https://doc.fastgpt.in/docs/workflow/intro)
-10. [使用文档](https://doc.fastgpt.in/docs/intro/)
-11. [点击查看商业版](https://doc.fastgpt.in/docs/commercial/)
+1. 新增 - 使用记录导出和仪表盘。
+2. 新增 - DeepSeek resoner 模型支持输出思考过程。
+3. 新增 - markdown 语法扩展，支持音视频（代码块 audio 和 video）。
+4. 新增 - 飞书/语雀知识库。
+5. 新增 - 工作流知识库检索支持按知识库权限进行过滤。
+6. 新增 - 流程等待插件，可以等待 n 毫秒后继续执行流程。
+7. 新增 - 飞书机器人接入，支持配置私有化飞书地址。
+8. 新增 - 支持通过 JSON 配置直接创建应用。
+9. 新增 - 支持通过 CURL 脚本快速创建 HTTP 插件。
+10. 新增 - 支持部门架构权限模式。
+

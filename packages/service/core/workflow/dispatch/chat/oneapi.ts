@@ -1,240 +1,315 @@
 import type { NextApiResponse } from 'next';
-import {
-  filterGPTMessageByMaxTokens,
-  formatGPTMessagesInRequestBefore,
-  loadChatImgToBase64
-} from '../../../chat/utils';
+import { filterGPTMessageByMaxContext, loadRequestMessages } from '../../../chat/utils';
 import type { ChatItemType, UserChatItemValueItemType } from '@fastgpt/global/core/chat/type.d';
 import { ChatRoleEnum } from '@fastgpt/global/core/chat/constants';
-import { SseResponseEventEnum } from '@fastgpt/global/core/module/runtime/constants';
-import { textAdaptGptResponse } from '@fastgpt/global/core/module/runtime/utils';
-import { getAIApi } from '../../../ai/config';
-import type {
-  ChatCompletion,
-  ChatCompletionMessageParam,
-  StreamChatType
-} from '@fastgpt/global/core/ai/type.d';
+import { SseResponseEventEnum } from '@fastgpt/global/core/workflow/runtime/constants';
+import {
+  parseReasoningContent,
+  parseReasoningStreamContent,
+  textAdaptGptResponse
+} from '@fastgpt/global/core/workflow/runtime/utils';
+import { createChatCompletion } from '../../../ai/config';
+import type { ChatCompletionMessageParam, StreamChatType } from '@fastgpt/global/core/ai/type.d';
 import { formatModelChars2Points } from '../../../../support/wallet/usage/utils';
 import type { LLMModelItemType } from '@fastgpt/global/core/ai/model.d';
 import { postTextCensor } from '../../../../common/api/requestPlusApi';
 import { ChatCompletionRequestMessageRoleEnum } from '@fastgpt/global/core/ai/constants';
-import type { ModuleItemType } from '@fastgpt/global/core/module/type.d';
-import type { DispatchNodeResultType } from '@fastgpt/global/core/module/runtime/type';
-import {
-  countGptMessagesTokens,
-  countMessagesTokens
-} from '@fastgpt/global/common/string/tiktoken';
+import type { DispatchNodeResultType } from '@fastgpt/global/core/workflow/runtime/type';
+import { countGptMessagesTokens } from '../../../../common/string/tiktoken/index';
 import {
   chats2GPTMessages,
-  getSystemPrompt,
+  chatValue2RuntimePrompt,
+  getSystemPrompt_ChatItemType,
   GPTMessages2Chats,
   runtimePrompt2ChatsValue
 } from '@fastgpt/global/core/chat/adapt';
 import {
-  Prompt_QuotePromptList,
-  Prompt_QuoteTemplateList
+  Prompt_DocumentQuote,
+  Prompt_userQuotePromptList,
+  Prompt_QuoteTemplateList,
+  Prompt_systemQuotePromptList
 } from '@fastgpt/global/core/ai/prompt/AIChat';
-import type { AIChatModuleProps } from '@fastgpt/global/core/module/node/type.d';
+import type { AIChatNodeProps } from '@fastgpt/global/core/workflow/runtime/type.d';
 import { replaceVariable } from '@fastgpt/global/common/string/tools';
-import type { ModuleDispatchProps } from '@fastgpt/global/core/module/type.d';
-import { responseWrite, responseWriteController } from '../../../../common/response';
-import { getLLMModel, ModelTypeEnum } from '../../../ai/model';
+import type { ModuleDispatchProps } from '@fastgpt/global/core/workflow/runtime/type';
+import { responseWriteController } from '../../../../common/response';
+import { getLLMModel } from '../../../ai/model';
 import type { SearchDataResponseItemType } from '@fastgpt/global/core/dataset/type';
-import { ModuleInputKeyEnum, ModuleOutputKeyEnum } from '@fastgpt/global/core/module/constants';
-import { DispatchNodeResponseKeyEnum } from '@fastgpt/global/core/module/runtime/constants';
-import { getHistories } from '../utils';
-import { filterSearchResultsByMaxChars } from '@fastgpt/global/core/dataset/search/utils';
+import { NodeInputKeyEnum, NodeOutputKeyEnum } from '@fastgpt/global/core/workflow/constants';
+import { DispatchNodeResponseKeyEnum } from '@fastgpt/global/core/workflow/runtime/constants';
+import { checkQuoteQAValue, getHistories } from '../utils';
+import { filterSearchResultsByMaxChars } from '../../utils';
 import { getHistoryPreview } from '@fastgpt/global/core/chat/utils';
+import { computedMaxToken, llmCompletionsBodyFormat } from '../../../ai/utils';
+import { WorkflowResponseType } from '../type';
+import { formatTime2YMDHM } from '@fastgpt/global/common/string/time';
+import { AiChatQuoteRoleType } from '@fastgpt/global/core/workflow/template/system/aiChat/type';
+import { getFileContentFromLinks, getHistoryFileLinks } from '../tools/readFiles';
+import { parseUrlToFileType } from '@fastgpt/global/common/file/tools';
+import { i18nT } from '../../../../../web/i18n/utils';
+import { ModelTypeEnum } from '@fastgpt/global/core/ai/model';
 
 export type ChatProps = ModuleDispatchProps<
-  AIChatModuleProps & {
-    [ModuleInputKeyEnum.userChatInput]: string;
-    [ModuleInputKeyEnum.history]?: ChatItemType[] | number;
-    [ModuleInputKeyEnum.aiChatDatasetQuote]?: SearchDataResponseItemType[];
+  AIChatNodeProps & {
+    [NodeInputKeyEnum.userChatInput]?: string;
+    [NodeInputKeyEnum.history]?: ChatItemType[] | number;
+    [NodeInputKeyEnum.aiChatDatasetQuote]?: SearchDataResponseItemType[];
   }
 >;
 export type ChatResponse = DispatchNodeResultType<{
-  [ModuleOutputKeyEnum.answerText]: string;
-  [ModuleOutputKeyEnum.history]: ChatItemType[];
+  [NodeOutputKeyEnum.answerText]: string;
+  [NodeOutputKeyEnum.reasoningText]?: string;
+  [NodeOutputKeyEnum.history]: ChatItemType[];
 }>;
 
 /* request openai chat */
 export const dispatchChatCompletion = async (props: ChatProps): Promise<ChatResponse> => {
   let {
     res,
+    requestOrigin,
     stream = false,
-    detail = false,
-    user,
+    externalProvider,
     histories,
-    module: { name, outputs },
-    inputFiles = [],
+    node: { name },
+    query,
+    runningAppInfo: { teamId },
+    workflowStreamResponse,
+    chatConfig,
     params: {
       model,
-      temperature = 0,
-      maxToken = 4000,
+      temperature,
+      maxToken,
       history = 6,
       quoteQA,
-      userChatInput,
+      userChatInput = '',
       isResponseAnswerText = true,
       systemPrompt = '',
+      aiChatQuoteRole = 'system',
       quoteTemplate,
-      quotePrompt
+      quotePrompt,
+      aiChatVision,
+      aiChatReasoning = true,
+      aiChatTopP,
+      aiChatStopSign,
+      aiChatResponseFormat,
+      aiChatJsonSchema,
+
+      fileUrlList: fileLinks, // node quote file links
+      stringQuoteText //abandon
     }
   } = props;
-  if (!userChatInput && inputFiles.length === 0) {
-    return Promise.reject('Question is empty');
-  }
-  stream = stream && isResponseAnswerText;
+  const { files: inputFiles } = chatValue2RuntimePrompt(query); // Chat box input files
 
-  const chatHistories = getHistories(history, histories);
-
-  // temperature adapt
   const modelConstantsData = getLLMModel(model);
-
   if (!modelConstantsData) {
     return Promise.reject('The chat model is undefined, you need to select a chat model.');
   }
 
-  const { quoteText } = filterQuote({
-    quoteQA,
-    model: modelConstantsData,
-    quoteTemplate
-  });
+  aiChatVision = modelConstantsData.vision && aiChatVision;
+  aiChatReasoning = !!aiChatReasoning && !!modelConstantsData.reasoning;
 
-  // censor model and system key
-  if (modelConstantsData.censor && !user.openaiAccount?.key) {
-    await postTextCensor({
-      text: `${systemPrompt}
-      ${quoteText}
-      ${userChatInput}
-      `
-    });
-  }
+  const chatHistories = getHistories(history, histories);
+  quoteQA = checkQuoteQAValue(quoteQA);
 
-  const { filterMessages } = getChatMessages({
-    model: modelConstantsData,
-    histories: chatHistories,
-    quoteQA,
-    quoteText,
-    quotePrompt,
-    userChatInput,
-    inputFiles,
-    systemPrompt
-  });
-
-  const { max_tokens } = await getMaxTokens({
-    model: modelConstantsData,
-    maxToken,
-    filterMessages
-  });
-
-  // FastGPT temperature range: 1~10
-  temperature = +(modelConstantsData.maxTemperature * (temperature / 10)).toFixed(2);
-  temperature = Math.max(temperature, 0.01);
-  const ai = getAIApi({
-    userKey: user.openaiAccount,
-    timeout: 480000
-  });
-
-  const concatMessages = [
-    ...(modelConstantsData.defaultSystemChatPrompt
-      ? [
-          {
-            role: ChatCompletionRequestMessageRoleEnum.System,
-            content: modelConstantsData.defaultSystemChatPrompt
-          }
-        ]
-      : []),
-    ...formatGPTMessagesInRequestBefore(filterMessages)
-  ] as ChatCompletionMessageParam[];
-
-  if (concatMessages.length === 0) {
-    return Promise.reject('core.chat.error.Messages empty');
-  }
-
-  const loadMessages = await Promise.all(
-    concatMessages.map(async (item) => {
-      if (item.role === ChatCompletionRequestMessageRoleEnum.User) {
-        return {
-          ...item,
-          content: await loadChatImgToBase64(item.content)
-        };
-      } else {
-        return item;
-      }
+  const [{ datasetQuoteText }, { documentQuoteText, userFiles }] = await Promise.all([
+    filterDatasetQuote({
+      quoteQA,
+      model: modelConstantsData,
+      quoteTemplate
+    }),
+    getMultiInput({
+      histories: chatHistories,
+      inputFiles,
+      fileLinks,
+      stringQuoteText,
+      requestOrigin,
+      maxFiles: chatConfig?.fileSelectConfig?.maxFiles || 20,
+      teamId
     })
-  );
+  ]);
 
-  const response = await ai.chat.completions.create(
+  if (!userChatInput && !documentQuoteText && userFiles.length === 0) {
+    return Promise.reject(i18nT('chat:AI_input_is_empty'));
+  }
+
+  const max_tokens = computedMaxToken({
+    model: modelConstantsData,
+    maxToken
+  });
+
+  const [{ filterMessages }] = await Promise.all([
+    getChatMessages({
+      model: modelConstantsData,
+      maxTokens: max_tokens,
+      histories: chatHistories,
+      useDatasetQuote: quoteQA !== undefined,
+      datasetQuoteText,
+      aiChatQuoteRole,
+      datasetQuotePrompt: quotePrompt,
+      userChatInput,
+      systemPrompt,
+      userFiles,
+      documentQuoteText
+    }),
+    // Censor = true and system key, will check content
+    (() => {
+      if (modelConstantsData.censor && !externalProvider.openaiAccount?.key) {
+        return postTextCensor({
+          text: `${systemPrompt}
+            ${userChatInput}
+          `
+        });
+      }
+    })()
+  ]);
+
+  const requestMessages = await loadRequestMessages({
+    messages: filterMessages,
+    useVision: aiChatVision,
+    origin: requestOrigin
+  });
+
+  const requestBody = llmCompletionsBodyFormat(
     {
-      ...modelConstantsData?.defaultConfig,
       model: modelConstantsData.model,
+      stream,
+      messages: requestMessages,
       temperature,
       max_tokens,
-      stream,
-      messages: loadMessages
+      top_p: aiChatTopP,
+      stop: aiChatStopSign,
+      response_format: aiChatResponseFormat as any,
+      json_schema: aiChatJsonSchema
     },
-    {
+    modelConstantsData
+  );
+  // console.log(JSON.stringify(requestBody, null, 2), '===');
+  const { response, isStreamResponse, getEmptyResponseTip } = await createChatCompletion({
+    body: requestBody,
+    userKey: externalProvider.openaiAccount,
+    options: {
       headers: {
         Accept: 'application/json, text/plain, */*'
       }
     }
-  );
+  });
 
-  const { answerText } = await (async () => {
-    if (stream) {
+  const { answerText, reasoningText } = await (async () => {
+    if (isStreamResponse) {
+      if (!res) {
+        return {
+          answerText: '',
+          reasoningText: ''
+        };
+      }
       // sse response
-      const { answer } = await streamResponse({
+      const { answer, reasoning } = await streamResponse({
         res,
-        detail,
-        stream: response
+        stream: response,
+        aiChatReasoning,
+        isResponseAnswerText,
+        workflowStreamResponse
       });
 
-      targetResponse({ res, detail, outputs });
-
       return {
-        answerText: answer
+        answerText: answer,
+        reasoningText: reasoning
       };
     } else {
-      const unStreamResponse = response as ChatCompletion;
-      const answer = unStreamResponse.choices?.[0]?.message?.content || '';
+      const { content, reasoningContent } = (() => {
+        const content = response.choices?.[0]?.message?.content || '';
+        // @ts-ignore
+        const reasoningContent: string = response.choices?.[0]?.message?.reasoning_content || '';
+
+        // API already parse reasoning content
+        if (reasoningContent || !aiChatReasoning) {
+          return {
+            content,
+            reasoningContent
+          };
+        }
+
+        const [think, answer] = parseReasoningContent(content);
+        return {
+          content: answer,
+          reasoningContent: think
+        };
+      })();
+
+      // Some models do not support streaming
+      if (stream) {
+        if (aiChatReasoning && reasoningContent) {
+          workflowStreamResponse?.({
+            event: SseResponseEventEnum.fastAnswer,
+            data: textAdaptGptResponse({
+              reasoning_content: reasoningContent
+            })
+          });
+        }
+        if (isResponseAnswerText && content) {
+          workflowStreamResponse?.({
+            event: SseResponseEventEnum.fastAnswer,
+            data: textAdaptGptResponse({
+              text: content
+            })
+          });
+        }
+      }
 
       return {
-        answerText: answer
+        answerText: content,
+        reasoningText: reasoningContent
       };
     }
   })();
 
-  const completeMessages = filterMessages.concat({
-    role: ChatCompletionRequestMessageRoleEnum.Assistant,
-    content: answerText
-  });
+  if (!answerText) {
+    return Promise.reject(getEmptyResponseTip());
+  }
+
+  const AIMessages: ChatCompletionMessageParam[] = [
+    {
+      role: ChatCompletionRequestMessageRoleEnum.Assistant,
+      content: answerText,
+      reasoning_text: reasoningText // reasoning_text is only recorded for response, but not for request
+    }
+  ];
+
+  const completeMessages = [...requestMessages, ...AIMessages];
   const chatCompleteMessages = GPTMessages2Chats(completeMessages);
 
-  const tokens = countMessagesTokens(chatCompleteMessages);
+  const inputTokens = await countGptMessagesTokens(requestMessages);
+  const outputTokens = await countGptMessagesTokens(AIMessages);
+
   const { totalPoints, modelName } = formatModelChars2Points({
     model,
-    tokens,
+    inputTokens,
+    outputTokens,
     modelType: ModelTypeEnum.llm
   });
 
   return {
-    answerText,
+    answerText: answerText.trim(),
+    reasoningText,
     [DispatchNodeResponseKeyEnum.nodeResponse]: {
-      totalPoints: user.openaiAccount?.key ? 0 : totalPoints,
+      totalPoints: externalProvider.openaiAccount?.key ? 0 : totalPoints,
       model: modelName,
-      tokens,
+      tokens: inputTokens + outputTokens,
+      inputTokens: inputTokens,
+      outputTokens: outputTokens,
       query: `${userChatInput}`,
       maxToken: max_tokens,
-      historyPreview: getHistoryPreview(chatCompleteMessages),
+      reasoningText,
+      historyPreview: getHistoryPreview(chatCompleteMessages, 10000, aiChatVision),
       contextTotalLen: completeMessages.length
     },
     [DispatchNodeResponseKeyEnum.nodeDispatchUsages]: [
       {
         moduleName: name,
-        totalPoints: user.openaiAccount?.key ? 0 : totalPoints,
+        totalPoints: externalProvider.openaiAccount?.key ? 0 : totalPoints,
         model: modelName,
-        tokens
+        inputTokens: inputTokens,
+        outputTokens: outputTokens
       }
     ],
     [DispatchNodeResponseKeyEnum.toolResponses]: answerText,
@@ -242,7 +317,7 @@ export const dispatchChatCompletion = async (props: ChatProps): Promise<ChatResp
   };
 };
 
-function filterQuote({
+async function filterDatasetQuote({
   quoteQA = [],
   model,
   quoteTemplate
@@ -253,155 +328,237 @@ function filterQuote({
 }) {
   function getValue(item: SearchDataResponseItemType, index: number) {
     return replaceVariable(quoteTemplate || Prompt_QuoteTemplateList[0].value, {
+      id: item.id,
       q: item.q,
       a: item.a,
+      updateTime: formatTime2YMDHM(item.updateTime),
       source: item.sourceName,
-      sourceId: String(item.sourceId || 'UnKnow'),
+      sourceId: String(item.sourceId || ''),
       index: index + 1
     });
   }
 
   // slice filterSearch
-  const filterQuoteQA = filterSearchResultsByMaxChars(quoteQA, model.quoteMaxToken);
+  const filterQuoteQA = await filterSearchResultsByMaxChars(quoteQA, model.quoteMaxToken);
 
-  const quoteText =
+  const datasetQuoteText =
     filterQuoteQA.length > 0
       ? `${filterQuoteQA.map((item, index) => getValue(item, index).trim()).join('\n------\n')}`
       : '';
 
   return {
-    quoteText
+    datasetQuoteText
   };
 }
-function getChatMessages({
-  quotePrompt,
-  quoteText,
-  quoteQA,
+
+async function getMultiInput({
+  histories,
+  inputFiles,
+  fileLinks,
+  stringQuoteText,
+  requestOrigin,
+  maxFiles,
+  teamId
+}: {
+  histories: ChatItemType[];
+  inputFiles: UserChatItemValueItemType['file'][];
+  fileLinks?: string[];
+  stringQuoteText?: string; // file quote
+  requestOrigin?: string;
+  maxFiles: number;
+  teamId: string;
+}) {
+  // 旧版本适配====>
+  if (stringQuoteText) {
+    return {
+      documentQuoteText: stringQuoteText,
+      userFiles: inputFiles
+    };
+  }
+
+  // 没有引用文件参考，但是可能用了图片识别
+  if (!fileLinks) {
+    return {
+      documentQuoteText: '',
+      userFiles: inputFiles
+    };
+  }
+  // 旧版本适配<====
+
+  // If fileLinks params is not empty, it means it is a new version, not get the global file.
+
+  // Get files from histories
+  const filesFromHistories = getHistoryFileLinks(histories);
+  const urls = [...fileLinks, ...filesFromHistories];
+
+  if (urls.length === 0) {
+    return {
+      documentQuoteText: '',
+      userFiles: []
+    };
+  }
+
+  const { text } = await getFileContentFromLinks({
+    // Concat fileUrlList and filesFromHistories; remove not supported files
+    urls,
+    requestOrigin,
+    maxFiles,
+    teamId
+  });
+
+  return {
+    documentQuoteText: text,
+    userFiles: fileLinks.map((url) => parseUrlToFileType(url)).filter(Boolean)
+  };
+}
+
+async function getChatMessages({
+  model,
+  maxTokens = 0,
+  aiChatQuoteRole,
+  datasetQuotePrompt = '',
+  datasetQuoteText,
+  useDatasetQuote,
   histories = [],
   systemPrompt,
   userChatInput,
-  inputFiles,
-  model
+  userFiles,
+  documentQuoteText
 }: {
-  quotePrompt?: string;
-  quoteText: string;
-  quoteQA: ChatProps['params']['quoteQA'];
+  model: LLMModelItemType;
+  maxTokens?: number;
+  // dataset quote
+  aiChatQuoteRole: AiChatQuoteRoleType; // user: replace user prompt; system: replace system prompt
+  datasetQuotePrompt?: string;
+  datasetQuoteText: string;
+
+  useDatasetQuote: boolean;
   histories: ChatItemType[];
   systemPrompt: string;
   userChatInput: string;
-  inputFiles: UserChatItemValueItemType['file'][];
-  model: LLMModelItemType;
+
+  userFiles: UserChatItemValueItemType['file'][];
+  documentQuoteText?: string; // document quote
 }) {
+  // Dataset prompt ====>
+  // User role or prompt include question
+  const quoteRole =
+    aiChatQuoteRole === 'user' || datasetQuotePrompt.includes('{{question}}') ? 'user' : 'system';
+
+  const datasetQuotePromptTemplate = datasetQuotePrompt
+    ? datasetQuotePrompt
+    : quoteRole === 'user'
+      ? Prompt_userQuotePromptList[0].value
+      : Prompt_systemQuotePromptList[0].value;
+
+  // Reset user input, add dataset quote to user input
   const replaceInputValue =
-    quoteQA !== undefined
-      ? replaceVariable(quotePrompt || Prompt_QuotePromptList[0].value, {
-          quote: quoteText,
+    useDatasetQuote && quoteRole === 'user'
+      ? replaceVariable(datasetQuotePromptTemplate, {
+          quote: datasetQuoteText,
           question: userChatInput
         })
       : userChatInput;
+  // Dataset prompt <====
+
+  // Concat system prompt
+  const concatenateSystemPrompt = [
+    model.defaultSystemChatPrompt,
+    systemPrompt,
+    useDatasetQuote && quoteRole === 'system'
+      ? replaceVariable(datasetQuotePromptTemplate, {
+          quote: datasetQuoteText
+        })
+      : '',
+    documentQuoteText
+      ? replaceVariable(Prompt_DocumentQuote, {
+          quote: documentQuoteText
+        })
+      : ''
+  ]
+    .filter(Boolean)
+    .join('\n\n===---===---===\n\n');
 
   const messages: ChatItemType[] = [
-    ...getSystemPrompt(systemPrompt),
+    ...getSystemPrompt_ChatItemType(concatenateSystemPrompt),
     ...histories,
     {
       obj: ChatRoleEnum.Human,
       value: runtimePrompt2ChatsValue({
-        files: inputFiles,
+        files: userFiles,
         text: replaceInputValue
       })
     }
   ];
+
   const adaptMessages = chats2GPTMessages({ messages, reserveId: false });
 
-  const filterMessages = filterGPTMessageByMaxTokens({
+  const filterMessages = await filterGPTMessageByMaxContext({
     messages: adaptMessages,
-    maxTokens: model.maxContext - 300 // filter token. not response maxToken
+    maxContext: model.maxContext - maxTokens // filter token. not response maxToken
   });
 
   return {
     filterMessages
   };
 }
-function getMaxTokens({
-  maxToken,
-  model,
-  filterMessages = []
-}: {
-  maxToken: number;
-  model: LLMModelItemType;
-  filterMessages: ChatCompletionMessageParam[];
-}) {
-  maxToken = Math.min(maxToken, model.maxResponse);
-  const tokensLimit = model.maxContext;
-
-  /* count response max token */
-  const promptsToken = countGptMessagesTokens(filterMessages);
-  maxToken = promptsToken + maxToken > tokensLimit ? tokensLimit - promptsToken : maxToken;
-
-  if (maxToken <= 0) {
-    maxToken = 200;
-  }
-  return {
-    max_tokens: maxToken
-  };
-}
-
-function targetResponse({
-  res,
-  outputs,
-  detail
-}: {
-  res: NextApiResponse;
-  outputs: ModuleItemType['outputs'];
-  detail: boolean;
-}) {
-  const targets =
-    outputs.find((output) => output.key === ModuleOutputKeyEnum.answerText)?.targets || [];
-
-  if (targets.length === 0) return;
-  responseWrite({
-    res,
-    event: detail ? SseResponseEventEnum.answer : undefined,
-    data: textAdaptGptResponse({
-      text: '\n'
-    })
-  });
-}
 
 async function streamResponse({
   res,
-  detail,
-  stream
+  stream,
+  workflowStreamResponse,
+  aiChatReasoning,
+  isResponseAnswerText
 }: {
   res: NextApiResponse;
-  detail: boolean;
   stream: StreamChatType;
+  workflowStreamResponse?: WorkflowResponseType;
+  aiChatReasoning?: boolean;
+  isResponseAnswerText?: boolean;
 }) {
   const write = responseWriteController({
     res,
     readStream: stream
   });
   let answer = '';
+  let reasoning = '';
+  const { parsePart, getStartTagBuffer } = parseReasoningStreamContent();
+
   for await (const part of stream) {
     if (res.closed) {
       stream.controller?.abort();
       break;
     }
-    const content = part.choices?.[0]?.delta?.content || '';
+
+    const [reasoningContent, content] = parsePart(part, aiChatReasoning);
     answer += content;
+    reasoning += reasoningContent;
 
-    responseWrite({
-      write,
-      event: detail ? SseResponseEventEnum.answer : undefined,
-      data: textAdaptGptResponse({
-        text: content
-      })
-    });
+    if (aiChatReasoning && reasoningContent) {
+      workflowStreamResponse?.({
+        write,
+        event: SseResponseEventEnum.answer,
+        data: textAdaptGptResponse({
+          reasoning_content: reasoningContent
+        })
+      });
+    }
+
+    if (isResponseAnswerText && content) {
+      workflowStreamResponse?.({
+        write,
+        event: SseResponseEventEnum.answer,
+        data: textAdaptGptResponse({
+          text: content
+        })
+      });
+    }
   }
 
-  if (!answer) {
-    return Promise.reject('core.chat.Chat API is error or undefined');
+  // if answer is empty, try to get value from startTagBuffer. (Cause: The response content is too short to exceed the minimum parse length)
+  if (answer === '') {
+    answer = getStartTagBuffer();
   }
 
-  return { answer };
+  return { answer, reasoning };
 }

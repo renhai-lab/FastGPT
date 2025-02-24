@@ -1,41 +1,78 @@
 /* 
     Read db file content and response 3000 words
 */
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
-import { readFileContentFromMongo } from '@fastgpt/service/common/file/gridfs/controller';
-import { authFile } from '@fastgpt/service/support/permission/auth/file';
-import { BucketNameEnum } from '@fastgpt/global/common/file/constants';
+import type { NextApiResponse } from 'next';
+import { authCollectionFile } from '@fastgpt/service/support/permission/auth/file';
+import { NextAPI } from '@/service/middleware/entry';
+import { DatasetSourceReadTypeEnum } from '@fastgpt/global/core/dataset/constants';
+import { readDatasetSourceRawText } from '@fastgpt/service/core/dataset/read';
+import { ApiRequestProps } from '@fastgpt/service/type/next';
+import {
+  OwnerPermissionVal,
+  WritePermissionVal
+} from '@fastgpt/global/support/permission/constant';
+import { authDataset } from '@fastgpt/service/support/permission/dataset/auth';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
-    const { fileId, csvFormat } = req.body as { fileId: string; csvFormat?: boolean };
+export type PreviewContextProps = {
+  datasetId: string;
+  type: DatasetSourceReadTypeEnum;
+  sourceId: string;
+  isQAImport?: boolean;
+  selector?: string;
+  externalFileId?: string;
+};
 
-    if (!fileId) {
-      throw new Error('fileId is empty');
-    }
+async function handler(req: ApiRequestProps<PreviewContextProps>, res: NextApiResponse<any>) {
+  const { type, sourceId, isQAImport, selector, datasetId, externalFileId } = req.body;
 
-    const { teamId } = await authFile({ req, authToken: true, fileId });
-
-    const { rawText } = await readFileContentFromMongo({
-      teamId,
-      bucketName: BucketNameEnum.dataset,
-      fileId,
-      csvFormat
-    });
-
-    jsonRes(res, {
-      data: {
-        previewContent: rawText.slice(0, 3000),
-        totalLength: rawText.length
-      }
-    });
-  } catch (error) {
-    jsonRes(res, {
-      code: 500,
-      error
-    });
+  if (!sourceId) {
+    throw new Error('fileId is empty');
   }
+
+  const { teamId, apiServer, feishuServer, yuqueServer } = await (async () => {
+    if (type === DatasetSourceReadTypeEnum.fileLocal) {
+      const res = await authCollectionFile({
+        req,
+        authToken: true,
+        authApiKey: true,
+        fileId: sourceId,
+        per: OwnerPermissionVal
+      });
+      return {
+        teamId: res.teamId
+      };
+    }
+    const { dataset } = await authDataset({
+      req,
+      authApiKey: true,
+      authToken: true,
+      datasetId,
+      per: WritePermissionVal
+    });
+    return {
+      teamId: dataset.teamId,
+      apiServer: dataset.apiServer,
+      feishuServer: dataset.feishuServer,
+      yuqueServer: dataset.yuqueServer
+    };
+  })();
+
+  const rawText = await readDatasetSourceRawText({
+    teamId,
+    type,
+    sourceId,
+    isQAImport,
+    selector,
+    apiServer,
+    feishuServer,
+    yuqueServer,
+    externalFileId
+  });
+
+  return {
+    previewContent: rawText.slice(0, 3000),
+    totalLength: rawText.length
+  };
 }
+
+export default NextAPI(handler);
